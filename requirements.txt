@@ -1,0 +1,12 @@
+requests
+pandas
+numpy
+streamlit
+networkx
+geopy
+gtfs-kit
+folium
+streamlit-folium
+plotly
+python-dotenv
+polyline
