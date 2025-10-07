@@ -47,9 +47,9 @@ st.set_page_config(
 )
 
 # Title and description
-st.title("🚇 🚴 Paris: Metro vs E-Bike Comparison")
+st.title("🚇 🚴 Paris: Metro vs Bikeshare Comparisonerizer 9001")
 st.markdown("""
-Compare travel time and cost between taking the metro or riding an e-bike in Paris.
+Compare travel time and cost between taking the metro or riding a shared e-bike in Paris.
 **Click on the map to select your origin and destination.**
 """)
 
@@ -60,18 +60,75 @@ Interested in collaborating on something similar? [Reach out on LinkedIn!](https
 """)
 
 # Helper functions
-def calculate_bike_cost(duration_minutes, provider, use_pass=False):
-    """Calculate e-bike cost for given duration and provider"""
-    pricing = BIKE_PROVIDERS[provider]
+def calculate_all_bike_costs(duration_minutes, provider):
+    """Calculate all pricing options for a provider
     
-    if use_pass:
-        # 30-minute pass pricing
-        return duration_minutes * pricing["pass_30min"]
+    Returns: list of dicts with pricing info
+    """
+    import math
+    
+    pricing = BIKE_PROVIDERS[provider]
+    options = []
+    
+    # Per-minute pricing
+    if pricing["per_minute"] is not None:
+        cost = pricing["unlock"] + (duration_minutes * pricing["per_minute"])
+        options.append({
+            "name": "Per-minute",
+            "cost": cost,
+            "remaining": None,
+            "remaining_type": None
+        })
+    
+    # Pass options
+    if provider == "Velib'":
+        # Velib' special handling
+        for pass_option in pricing["passes"]:
+            overage_blocks = 0
+            if duration_minutes > pass_option["minutes"]:
+                overage_minutes = duration_minutes - pass_option["minutes"]
+                overage_blocks = math.ceil(overage_minutes / 30)
+            
+            if pass_option["type"] == "single":
+                # Ticket V - single trip
+                cost = pass_option["cost"] + (overage_blocks * pass_option["overage_per_30min"])
+                options.append({
+                    "name": pass_option["name"],
+                    "cost": cost,
+                    "remaining": 0,
+                    "remaining_type": "trips"
+                })
+            else:
+                # 24h Pass - effective cost per trip
+                cost_per_trip = pass_option["cost"] / pass_option["trips"]
+                cost = cost_per_trip + (overage_blocks * pass_option["overage_per_30min"])
+                options.append({
+                    "name": pass_option["name"],
+                    "cost": cost,
+                    "remaining": pass_option["trips"] - 1,  # 4 trips left
+                    "remaining_type": "trips"
+                })
     else:
-        # Per-minute pricing with unlock fee
-        if pricing["per_minute"] is None:
-            return None  # Velib' doesn't have per-minute pricing
-        return pricing["unlock"] + (duration_minutes * pricing["per_minute"])
+        # Voi, Dott, Lime - pass bundles with carryover
+        for pass_option in pricing["passes"]:
+            if duration_minutes <= pass_option["minutes"]:
+                # Trip fits in pass - prorate cost
+                cost_per_minute = pass_option["cost"] / pass_option["minutes"]
+                cost = duration_minutes * cost_per_minute
+                remaining = pass_option["minutes"] - duration_minutes
+            else:
+                # Trip exceeds pass - charge marginal minutes at per-minute rate
+                cost = pass_option["cost"] + ((duration_minutes - pass_option["minutes"]) * pricing["per_minute"])
+                remaining = 0
+            
+            options.append({
+                "name": f"{pass_option['minutes']} min pass",
+                "cost": cost,
+                "remaining": remaining,
+                "remaining_type": "minutes"
+            })
+    
+    return options
 
 def get_metro_journey(from_coords, to_coords):
     """Get metro journey from Navitia API"""
@@ -471,87 +528,54 @@ if st.session_state.results:
         
         st.markdown("---")
         
-        # E-bike results - show both pricing models
+        # E-bike results - show ALL pricing options
         st.subheader("🚴 E-Bike Options")
-        st.caption(f"Including {walk_to_bike_time:.1f} min walk to bike ({walk_to_bike_distance}m)")
+        st.caption(f"Cycling time: {bike['duration_min']:.1f} min | Total journey: {bike['duration_min'] + walk_to_bike_time:.1f} min (includes {walk_to_bike_time:.1f} min walk to bike)")
         
-        # Calculate total bike time including walking
+        # Calculate total bike time including walking (for comparison only)
         total_bike_time = bike['duration_min'] + walk_to_bike_time
         
-        # Create two sections for pricing models
-        tab1, tab2 = st.tabs(["Per-Minute Rate", "30-Minute Pass"])
+        # Calculate all pricing options for each provider
+        all_options = []
+        for provider in BIKE_PROVIDERS.keys():
+            options = calculate_all_bike_costs(bike['duration_min'], provider)  # Cost based on cycling time only
+            for option in options:
+                all_options.append({
+                    **option,
+                    "provider": provider
+                })
         
-        with tab1:
-            st.caption("Includes unlock fee + per-minute rate")
-            bike_results_per_min = []
-            for provider, pricing in BIKE_PROVIDERS.items():
-                cost = calculate_bike_cost(bike['duration_min'], provider, use_pass=False)
-                if cost is not None:
-                    bike_results_per_min.append({
-                        "provider": provider,
-                        "cost": cost,
-                        "duration": total_bike_time
-                    })
-            
-            bike_results_per_min.sort(key=lambda x: x['cost'])
-            
-            cols = st.columns(len(bike_results_per_min))
-            for idx, result in enumerate(bike_results_per_min):
-                with cols[idx]:
-                    if result['cost'] < METRO_COST:
-                        delta_text = f"-€{METRO_COST - result['cost']:.2f}"
-                        delta_color = "inverse"
-                    elif result['cost'] > METRO_COST:
-                        delta_text = f"+€{result['cost'] - METRO_COST:.2f}"
-                        delta_color = "normal"
-                    else:
-                        delta_text = "Same"
-                        delta_color = "off"
+        # Count how many options are cheaper than metro (excluding Velib')
+        cheaper_count = sum(1 for opt in all_options 
+                           if opt['provider'] != "Velib'" and opt['cost'] < METRO_COST)
+        total_count = sum(1 for opt in all_options if opt['provider'] != "Velib'")
+        
+        # Display options by provider in columns
+        provider_list = list(BIKE_PROVIDERS.keys())
+        cols = st.columns(len(provider_list))
+        
+        for idx, provider in enumerate(provider_list):
+            with cols[idx]:
+                st.markdown(f"### 🚴 {provider}")
+                provider_options = [opt for opt in all_options if opt['provider'] == provider]
+                
+                for option in provider_options:
+                    # Determine icon
+                    icon = "✅" if option['cost'] < METRO_COST else "❌"
                     
-                    st.metric(
-                        f"🚴 {result['provider']}",
-                        f"€{result['cost']:.2f}",
-                        delta=delta_text,
-                        delta_color=delta_color
-                    )
-                    st.caption(f"{result['duration']:.1f} min total")
-        
-        with tab2:
-            st.caption("30-minute pass - no unlock fee, lower per-minute rate")
-            bike_results_pass = []
-            for provider, pricing in BIKE_PROVIDERS.items():
-                cost = calculate_bike_cost(bike['duration_min'], provider, use_pass=True)
-                if cost is not None:
-                    bike_results_pass.append({
-                        "provider": provider,
-                        "cost": cost,
-                        "duration": total_bike_time
-                    })
-            
-            bike_results_pass.sort(key=lambda x: x['cost'])
-            
-            cols = st.columns(len(bike_results_pass))
-            for idx, result in enumerate(bike_results_pass):
-                with cols[idx]:
-                    if result['cost'] < METRO_COST:
-                        delta_text = f"-€{METRO_COST - result['cost']:.2f}"
-                        delta_color = "inverse"
-                    elif result['cost'] > METRO_COST:
-                        delta_text = f"+€{result['cost'] - METRO_COST:.2f}"
-                        delta_color = "normal"
+                    # Format remaining info with clarity
+                    if option['remaining_type'] == "minutes":
+                        remaining_text = f"{int(round(option['remaining']))} min remaining"
+                    elif option['remaining_type'] == "trips":
+                        remaining_text = f"{option['remaining']} trips remaining"
                     else:
-                        delta_text = "Same"
-                        delta_color = "off"
+                        remaining_text = ""
                     
-                    st.metric(
-                        f"🚴 {result['provider']}",
-                        f"€{result['cost']:.2f}",
-                        delta=delta_text,
-                        delta_color=delta_color
-                    )
-                    st.caption(f"{result['duration']:.1f} min total")
-        
-        st.markdown("---")
+                    # Display option compactly
+                    if remaining_text:
+                        st.markdown(f"{icon} **{option['name']}** - €{option['cost']:.2f} *({remaining_text})*")
+                    else:
+                        st.markdown(f"{icon} **{option['name']}** - €{option['cost']:.2f}")
         
         # Walking results
         if walking:
@@ -570,14 +594,12 @@ if st.session_state.results:
         # Comparison and recommendation
         st.header("🎯 Recommendation")
         
-        # Find cheapest option across both pricing models
-        all_bike_results = bike_results_per_min + bike_results_pass
-        cheapest_bike = min(all_bike_results, key=lambda x: x['cost'])
-        min_cost = cheapest_bike['cost']
+        # Find cheapest option overall
+        cheapest_option = min(all_options, key=lambda x: x['cost'])
+        min_cost = cheapest_option['cost']
         
-        # Find all providers that match the minimum cost (within €0.01)
-        cheapest_providers = [r['provider'] for r in all_bike_results if abs(r['cost'] - min_cost) < 0.01]
-        cheapest_providers = list(set(cheapest_providers))  # Remove duplicates
+        # Find all providers/options that match the minimum cost (within €0.01)
+        cheapest_providers = list(set([opt['provider'] for opt in all_options if abs(opt['cost'] - min_cost) < 0.01]))
         
         # Format provider list
         if len(cheapest_providers) == 1:
@@ -603,31 +625,29 @@ if st.session_state.results:
         
         with col2:
             st.subheader("💰 Cost Comparison")
-            if cost_diff < 0:
-                st.success(f"E-Bike is **€{abs(cost_diff):.2f} cheaper** ({provider_text})")
-            elif cost_diff > 0:
-                st.warning(f"Metro is **€{cost_diff:.2f} cheaper**")
-            else:
-                st.info("Same cost")
+            st.info(f"💡 **{cheaper_count} out of {total_count}** e-bike options are cheaper than metro (€{METRO_COST:.2f}) for this trip")
         
         # Final recommendation
         st.markdown("---")
+        
+        # Check if per-minute or any pass under 60 minutes is cheaper than metro
+        short_term_cheaper = any(
+            opt['cost'] < METRO_COST 
+            for opt in all_options 
+            if opt['provider'] != "Velib'" and (
+                opt['name'] == "Per-minute" or 
+                ('min pass' in opt['name'] and int(opt['name'].split()[0]) < 60)
+            )
+        )
+        
         recommended_mode = None
-        if cost_diff < -0.5 and time_diff < 10:
+        if short_term_cheaper:
             st.success(f"### ✅ Recommended: **E-Bike**")
-            st.markdown(f"Cheaper (€{abs(cost_diff):.2f} savings with {provider_text}) and similar travel time")
-            recommended_mode = "bike"
-        elif cost_diff < 0 and time_diff < 0:
-            st.success(f"### ✅ Recommended: **E-Bike**")
-            st.markdown(f"Both cheaper (€{abs(cost_diff):.2f} with {provider_text}) and faster ({abs(time_diff):.1f} min)")
-            recommended_mode = "bike"
-        elif time_diff < -5:
-            st.info(f"### ⚡ Recommended: **E-Bike**")
-            st.markdown(f"Much faster ({abs(time_diff):.1f} min savings)")
+            st.markdown(f"**{cheaper_count}** practical e-bike options beat metro pricing!")
             recommended_mode = "bike"
         else:
             st.info("### 🚇 Recommended: **Metro**")
-            st.markdown(f"More economical and predictable")
+            st.markdown(f"While **{cheaper_count}** e-bike options are cheaper, they require longer-term passes. Metro offers better value for single trips.")
             recommended_mode = "metro"
         
         # Route visualization - side by side maps
@@ -838,13 +858,13 @@ if st.session_state.results:
             st.write(f"- Total Duration: {total_bike_time:.1f} minutes")
             st.write(f"- Distance: {bike['distance_km']:.2f} km")
             
-            st.markdown("**E-Bike Costs (Per-Minute):**")
-            for result in bike_results_per_min:
-                st.write(f"- {result['provider']}: €{result['cost']:.2f}")
-            
-            st.markdown("**E-Bike Costs (30-Min Pass):**")
-            for result in bike_results_pass:
-                st.write(f"- {result['provider']}: €{result['cost']:.2f}")
+            st.markdown("**E-Bike Pricing Options:**")
+            for provider in BIKE_PROVIDERS.keys():
+                st.write(f"\n**{provider}:**")
+                provider_options = [opt for opt in all_options if opt['provider'] == provider]
+                for option in provider_options:
+                    icon = "✅" if option['cost'] < METRO_COST else "❌"
+                    st.write(f"  {icon} {option['name']}: €{option['cost']:.2f}")
     
     elif not metro:
         st.error("❌ Could not calculate metro route")
